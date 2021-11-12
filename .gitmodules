@@ -1,0 +1,6 @@
+[submodule "dgl"]
+	path = dgl
+	url = https://github.com/dmlc/dgl.git
+[submodule "ogb"]
+	path = ogb
+	url = https://github.com/snap-stanford/ogb.git

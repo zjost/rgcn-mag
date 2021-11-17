@@ -39,6 +39,52 @@ Namespace(
 # "Relation" linear layers have no bias term
 # "Root" linear layers (i.e., self-loops) have bias term 
 
+Number of model parameters: 154,366,772
+RGCN(
+  (emb_dict): ParameterDict(
+      (0): Parameter containing: [torch.cuda.FloatTensor of size 1134649x128 (GPU 0)]
+      (1): Parameter containing: [torch.cuda.FloatTensor of size 59965x128 (GPU 0)]
+      (2): Parameter containing: [torch.cuda.FloatTensor of size 8740x128 (GPU 0)]
+  )
+  (convs): ModuleList(
+    (0): RGCNConv(
+      (rel_lins): ModuleList(
+        (0): Linear(in_features=128, out_features=64, bias=False)
+        (1): Linear(in_features=128, out_features=64, bias=False)
+        (2): Linear(in_features=128, out_features=64, bias=False)
+        (3): Linear(in_features=128, out_features=64, bias=False)
+        (4): Linear(in_features=128, out_features=64, bias=False)
+        (5): Linear(in_features=128, out_features=64, bias=False)
+        (6): Linear(in_features=128, out_features=64, bias=False)
+      )
+      (root_lins): ModuleList(
+        (0): Linear(in_features=128, out_features=64, bias=True)
+        (1): Linear(in_features=128, out_features=64, bias=True)
+        (2): Linear(in_features=128, out_features=64, bias=True)
+        (3): Linear(in_features=128, out_features=64, bias=True)
+      )
+    )
+    (1): RGCNConv(
+      (rel_lins): ModuleList(
+        (0): Linear(in_features=64, out_features=349, bias=False)
+        (1): Linear(in_features=64, out_features=349, bias=False)
+        (2): Linear(in_features=64, out_features=349, bias=False)
+        (3): Linear(in_features=64, out_features=349, bias=False)
+        (4): Linear(in_features=64, out_features=349, bias=False)
+        (5): Linear(in_features=64, out_features=349, bias=False)
+        (6): Linear(in_features=64, out_features=349, bias=False)
+      )
+      (root_lins): ModuleList(
+        (0): Linear(in_features=64, out_features=349, bias=True)
+        (1): Linear(in_features=64, out_features=349, bias=True)
+        (2): Linear(in_features=64, out_features=349, bias=True)
+        (3): Linear(in_features=64, out_features=349, bias=True)
+      )
+    )
+  )
+)
+
+
 All runs:
 Highest Train: 80.03 ± 0.40
 Highest Valid: 47.75 ± 0.43
@@ -52,7 +98,11 @@ Final Test: 46.85 ± 0.48
 {'num_layers': 2, 'fanout': [25, 20], 'batch_size': 1024, 'dropout': 0.5, 
  'n_hidden': 64, 'lr': 0.01, 'n_bases': -1, 'n_epochs': 3, 'runs': 10}
 
-       train_acc valid_acc test_acc
-mean   0.937422  0.442171  0.401702
-std    0.001838  0.004746  0.006150
+Number of embedding parameters: 154,029,312
+Number of model parameters: 337,460
+Total number of parameters: 154,366,772
+
+      train_acc  valid_acc  test_acc
+mean   0.932635   0.457381  0.438895
+std    0.001636   0.003455  0.003325
 ```

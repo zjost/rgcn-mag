@@ -330,7 +330,6 @@ def prepare_data(args):
     g = add_reverse_hetero(g)
     print("Loaded graph: {}".format(g))
 
-    split_idx = dataset.get_idx_split()
     logger = Logger(args['runs'], args)
 
     # train sampler
@@ -400,8 +399,8 @@ def evaluate(g, model, loader, node_embed, labels, category, device):
      
     return total_loss / count, total_acc / count
 
-def train_dgl(g, model, node_embed, optimizer, train_loader, val_loader, 
-              labels, model_path, device, args):
+def train(g, model, node_embed, optimizer, train_loader, split_idx,  
+          labels, logger, model_path, device, run, args):
     
     # training loop
     print("start training...")
@@ -413,8 +412,8 @@ def train_dgl(g, model, node_embed, optimizer, train_loader, val_loader,
     model.train()
 
     for epoch in range(args['n_epochs']):
-        N = labels.size(0)
-        pbar = tqdm(total=N)
+        N_train= split_idx['train'][category].shape[0]
+        pbar = tqdm(total=N_train)
         pbar.set_description(f'Epoch {epoch:02d}')
         t0 = time.time()
         
@@ -444,21 +443,30 @@ def train_dgl(g, model, node_embed, optimizer, train_loader, val_loader,
 
             total_loss += loss.item() * batch_size
             pbar.update(batch_size)
-
-            train_acc = th.sum(y_hat.argmax(dim=1) == lbl).item() / len(seeds)
         
         pbar.close()
         t_delta = time.time() - t0
-        loss = total_loss / N
+        loss = total_loss / N_train
         
-        print(f"Epoch {epoch}:  took {t_delta} s")
+        #print(f"Epoch {epoch}:  took {t_delta} s")
 
-        val_loss, val_acc = evaluate(g, model, val_loader, node_embed, labels, category, device)
-        print("Epoch {:05d} | Valid Acc: {:.4f} | Valid loss: {:.4f}".
-              format(epoch, val_acc, val_loss))
-    print()
+        #val_loss, val_acc = evaluate(g, model, val_loader, node_embed, labels, category, device)
+        #print("Epoch {:05d} | Valid Acc: {:.4f} | Valid loss: {:.4f}".
+        #      format(epoch, val_acc, val_loss))
+        result = test(g, model, node_embed, labels, device, split_idx, args)
+        logger.add_result(run, result)
+        train_acc, valid_acc, test_acc = result
+        print(f'Run: {run + 1:02d}, '
+              f'Epoch: {epoch +1 :02d}, '
+              f'Loss: {loss:.4f}, '
+              f'Train: {100 * train_acc:.2f}%, '
+              f'Valid: {100 * valid_acc:.2f}%, '
+              f'Test: {100 * test_acc:.2f}%')
+
     if model_path is not None:
         th.save(model.state_dict(), model_path)
+    
+    return logger
 
 @th.no_grad()
 def test(g, model, node_embed, y_true, device, split_idx, args):
@@ -534,8 +542,7 @@ def main(args):
     (g, labels, num_classes, split_idx, 
         logger, train_loader, val_loader) = prepare_data(hyperparameters)
     
-    results = dict()
-    for i in range(hyperparameters['runs']):
+    for run in range(hyperparameters['runs']):
 
         embed_layer, model = get_model(g, num_classes, hyperparameters)
         model = model.to(device)
@@ -547,18 +554,21 @@ def main(args):
         all_params = itertools.chain(model.parameters(), embed_layer.parameters())
         optimizer = th.optim.Adam(all_params, lr=hyperparameters['lr'])
 
-        train_dgl(g, model, embed_layer(), optimizer, train_loader, val_loader, 
-                labels, 'models/model0.pt', device, hyperparameters)
+        logger = train(g, model, embed_layer(), optimizer, train_loader, split_idx,
+              labels, logger, 'models/model0.pt', device, run, hyperparameters)
 
         
-        train_acc, valid_acc, test_acc = test(g, model, embed_layer(), labels, device, split_idx, hyperparameters)
-        print(f"Train Acc: {train_acc} | Val Acc: {valid_acc} | Test Acc: {test_acc}")
-        results[i] = dict(train_acc=train_acc, valid_acc=valid_acc, test_acc=test_acc)
-
+        #train_acc, valid_acc, test_acc = test(g, model, embed_layer(), labels, device, split_idx, hyperparameters)
+        #print(f"Train Acc: {train_acc} | Val Acc: {valid_acc} | Test Acc: {test_acc}")
+        #results[i] = dict(train_acc=train_acc, valid_acc=valid_acc, test_acc=test_acc)
+        logger.print_statistics(run)
+    
     print("Final performance: ")
-    print(results)
+    logger.print_statistics()
 
-    print(pd.DataFrame.from_dict(results, orient='index').agg(['mean', 'std']))
+    #print("Final performance: ")
+    #print(results)
+    #print(pd.DataFrame.from_dict(results, orient='index').agg(['mean', 'std']))
 
 if __name__ == '__main__':
     args = parse_args()

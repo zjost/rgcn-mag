@@ -51,8 +51,16 @@ class RelGraphEmbed(nn.Module):
             if ntype in exclude:
                 continue
             embed = nn.Parameter(th.Tensor(g.number_of_nodes(ntype), self.embed_size))
-            nn.init.xavier_uniform_(embed, gain=nn.init.calculate_gain('relu'))
             self.embeds[ntype] = embed
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for emb in self.embeds.values():
+            # PyG
+            nn.init.xavier_uniform_(emb)
+            # DGL
+            #nn.init.xavier_uniform_(emb, gain=nn.init.calculate_gain('relu'))
 
     def forward(self, block=None):
         """Forward computation
@@ -127,10 +135,14 @@ class RelGraphConvLayer(nn.Module):
         self.use_basis = num_bases < len(self.rel_names) and weight
         if self.use_weight:
             if self.use_basis:
-                self.basis = dglnn.WeightBasis((in_feat, out_feat), num_bases, len(self.rel_names))
+                #self.basis = dglnn.WeightBasis((in_feat, out_feat), num_bases, len(self.rel_names))
+                raise Exception("Need to fix implementation for `use_basis`")
             else:
-                self.weight = nn.Parameter(th.Tensor(len(self.rel_names), in_feat, out_feat))
-                nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
+                #self.weight = nn.Parameter(th.Tensor(len(self.rel_names), in_feat, out_feat))
+                self.weight = nn.ModuleDict({
+                    rel_name: nn.Linear(in_feat, out_feat, bias=False)
+                    for rel_name in self.rel_names
+                })
 
         # weight for self loop
         if self.self_loop:
@@ -139,10 +151,28 @@ class RelGraphConvLayer(nn.Module):
                 ntype: nn.Linear(in_feat, out_feat, bias=bias)
                 for ntype in self.ntypes
             })
-            for layer in self.loop_weights.values():
-                nn.init.xavier_uniform_(layer.weight, gain=nn.init.calculate_gain('relu'))
 
         self.dropout = nn.Dropout(dropout)
+
+        self.reset_parameters()
+
+    
+    def reset_parameters(self):
+        if self.use_weight:
+            for layer in self.weight.values():
+                # New
+                layer.reset_parameters()
+                # DGL
+                #nn.init.xavier_uniform_(layer, gain=nn.init.calculate_gain('relu'))
+                # tmp
+                #nn.init.xavier_uniform_(self.weight, gain=nn.init.calculate_gain('relu'))
+
+        if self.self_loop:
+            for layer in self.loop_weights.values():
+                # New 
+                layer.reset_parameters()
+                # DGL
+                #nn.init.xavier_uniform_(layer.weight, gain=nn.init.calculate_gain('relu'))
 
     def forward(self, g, inputs):
         """Forward computation
@@ -161,9 +191,9 @@ class RelGraphConvLayer(nn.Module):
         """
         g = g.local_var()
         if self.use_weight:
-            weight = self.basis() if self.use_basis else self.weight
-            wdict = {self.rel_names[i] : {'weight' : w.squeeze(0)}
-                     for i, w in enumerate(th.split(weight, 1, dim=0))}
+            #weight = self.basis() if self.use_basis else self.weight
+            wdict = {rel_name: {'weight': self.weight[rel_name].weight.T}
+                     for rel_name in self.rel_names}
         else:
             wdict = {}
 
@@ -177,10 +207,7 @@ class RelGraphConvLayer(nn.Module):
 
         def _apply(ntype, h):
             if self.self_loop:
-                #h = h + th.matmul(inputs_dst[ntype], self.loop_weights[ntype])
                 h = h + self.loop_weights[ntype](inputs_dst[ntype])
-            #if self.bias:
-            #    h = h + self.h_bias
             if self.activation:
                 h = self.activation(h)
             return self.dropout(h)
@@ -227,6 +254,10 @@ class EntityClassify(nn.Module):
             self.h_dim, self.out_dim, g.ntypes, self.rel_names,
             self.num_bases, activation=None,
             self_loop=self.use_self_loop))
+
+    def reset_parameters(self):
+        for layer in self.layers:
+            layer.reset_parameters()
 
     def forward(self, h, blocks):
         for layer, block in zip(self.layers, blocks):
@@ -337,16 +368,9 @@ def prepare_data(args):
     train_loader = dgl.dataloading.NodeDataLoader(
         g, split_idx['train'], sampler,
         batch_size=args['batch_size'], shuffle=True, num_workers=32)
-
-    # validation sampler
-    # we do not use full neighbor to save computation resources
-    val_sampler = dgl.dataloading.MultiLayerNeighborSampler(args['fanout'])
-    val_loader = dgl.dataloading.NodeDataLoader(
-        g, split_idx['valid'], val_sampler,
-        batch_size=32768, shuffle=True, num_workers=32)
     
     return (g, labels, dataset.num_classes, split_idx,  
-        logger, train_loader, val_loader)
+            logger, train_loader)
 
 def get_model(g, num_classes, args):
     embed_layer = RelGraphEmbed(g, 128, exclude=['paper'])
@@ -362,42 +386,9 @@ def get_model(g, num_classes, args):
     print(embed_layer)
     print(f"Number of embedding parameters: {sum(p.numel() for p in embed_layer.parameters())}")
     print(model)
-    print([p.shape for p in model.parameters()])
     print(f"Number of model parameters: {sum(p.numel() for p in model.parameters())}")
-    
 
     return embed_layer, model
-
-@th.no_grad()
-def evaluate(g, model, loader, node_embed, labels, category, device):
-    model.eval()
-    total_loss = 0
-    total_acc = 0
-    count = 0
-    for input_nodes, seeds, blocks in loader:
-        blocks = [blk.to(device) for blk in blocks]
-        seeds = seeds[category]     # we only predict the nodes with type "category"
-
-        emb = extract_embed(node_embed, input_nodes)
-        # Get the batch's raw "paper" features
-        emb.update({'paper': g.ndata['feat']['paper'][input_nodes['paper']]})
-        lbl = labels[seeds]
-        
-        if th.cuda.is_available():
-            emb = {k : e.cuda() for k, e in emb.items()}
-            lbl = lbl.cuda()
-        
-
-        logits = model(emb, blocks)[category]
-        y_hat = logits.log_softmax(dim=-1)
-        loss = F.nll_loss(y_hat, lbl)
-
-        acc = th.sum(y_hat.argmax(dim=1) == lbl).item()
-        total_loss += loss.item() * len(seeds)
-        total_acc += acc
-        count += len(seeds)
-     
-    return total_loss / count, total_acc / count
 
 def train(g, model, node_embed, optimizer, train_loader, split_idx,  
           labels, logger, model_path, device, run, args):
@@ -406,7 +397,6 @@ def train(g, model, node_embed, optimizer, train_loader, split_idx,
     print("start training...")
     category = 'paper'
     
-
     if th.cuda.is_available():
         model.cuda()
     model.train()
@@ -448,11 +438,6 @@ def train(g, model, node_embed, optimizer, train_loader, split_idx,
         t_delta = time.time() - t0
         loss = total_loss / N_train
         
-        #print(f"Epoch {epoch}:  took {t_delta} s")
-
-        #val_loss, val_acc = evaluate(g, model, val_loader, node_embed, labels, category, device)
-        #print("Epoch {:05d} | Valid Acc: {:.4f} | Valid loss: {:.4f}".
-        #      format(epoch, val_acc, val_loss))
         result = test(g, model, node_embed, labels, device, split_idx, args)
         logger.add_result(run, result)
         train_acc, valid_acc, test_acc = result
@@ -487,7 +472,7 @@ def test(g, model, node_embed, y_true, device, split_idx, args):
     
     y_hats = list()
 
-    for i, (input_nodes, seeds, blocks) in enumerate(loader):
+    for input_nodes, seeds, blocks in loader:
         blocks = [blk.to(device) for blk in blocks]
         seeds = seeds[category]     # we only predict the nodes with type "category"
         batch_size = seeds.shape[0]
@@ -540,15 +525,15 @@ def main(args):
     device = f'cuda:0' if th.cuda.is_available() else 'cpu'
 
     (g, labels, num_classes, split_idx, 
-        logger, train_loader, val_loader) = prepare_data(hyperparameters)
+        logger, train_loader) = prepare_data(hyperparameters)
+
+    embed_layer, model = get_model(g, num_classes, hyperparameters)
+    model = model.to(device)
     
     for run in range(hyperparameters['runs']):
 
-        embed_layer, model = get_model(g, num_classes, hyperparameters)
-        model = model.to(device)
-
-        #print(embed_layer)
-        #print(model)
+        embed_layer.reset_parameters()
+        model.reset_parameters()
 
         # optimizer
         all_params = itertools.chain(model.parameters(), embed_layer.parameters())
@@ -557,18 +542,11 @@ def main(args):
         logger = train(g, model, embed_layer(), optimizer, train_loader, split_idx,
               labels, logger, 'models/model0.pt', device, run, hyperparameters)
 
-        
-        #train_acc, valid_acc, test_acc = test(g, model, embed_layer(), labels, device, split_idx, hyperparameters)
-        #print(f"Train Acc: {train_acc} | Val Acc: {valid_acc} | Test Acc: {test_acc}")
-        #results[i] = dict(train_acc=train_acc, valid_acc=valid_acc, test_acc=test_acc)
         logger.print_statistics(run)
     
     print("Final performance: ")
     logger.print_statistics()
 
-    #print("Final performance: ")
-    #print(results)
-    #print(pd.DataFrame.from_dict(results, orient='index').agg(['mean', 'std']))
 
 if __name__ == '__main__':
     args = parse_args()

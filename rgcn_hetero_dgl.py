@@ -1,5 +1,7 @@
 import os, sys
 import time
+import pickle
+from collections import defaultdict
 import argparse
 import itertools
 from tqdm import tqdm
@@ -13,16 +15,16 @@ import torch.nn.functional as F
 from ogb.nodeproppred import DglNodePropPredDataset, Evaluator
 
 # Add relevant paths to submodules
-cwd = os.path.dirname(os.path.realpath(__file__))
-ogb_example_dir = f"{cwd}/ogb/examples/nodeproppred/mag"
-sys.path.append(ogb_example_dir)
-dgl_example_dir = f"{cwd}/dgl/examples/pytorch/rgcn-hetero"
-sys.path.append(dgl_example_dir)
+#cwd = os.path.dirname(os.path.realpath(__file__))
+#ogb_example_dir = f"{cwd}/ogb/examples/nodeproppred/mag"
+#sys.path.append(ogb_example_dir)
+#dgl_example_dir = f"{cwd}/dgl/examples/pytorch/rgcn-hetero"
+#sys.path.append(dgl_example_dir)
 
 # From DGL example code
 #from model import RelGraphConvLayer
 # From OGB example code
-from logger import Logger
+#from logger import Logger
 
 def extract_embed(node_embed, input_nodes):
     emb = {}
@@ -350,6 +352,10 @@ def prepare_data(args):
                 relations[reverse_metapath] = (dst, src)           # Reverse edges
 
         new_g = dgl.heterograph(relations, num_nodes_dict=num_nodes_dict)
+        print(f"Number of edges: {new_g.num_edges()}")
+        # Remove duplicate edges
+        new_g = dgl.to_simple(new_g, return_counts=None, writeback_mapping=False, copy_ndata=True) 
+        print(f"Number of edges (after): {new_g.num_edges()}")
 
         # copy_ndata:
         for ntype in g.ntypes:
@@ -399,20 +405,25 @@ def train(g, model, node_embed, optimizer, train_loader, split_idx,
     
     if th.cuda.is_available():
         model.cuda()
-    model.train()
+
+    grads_list = list()
 
     for epoch in range(args['n_epochs']):
         N_train= split_idx['train'][category].shape[0]
         pbar = tqdm(total=N_train)
         pbar.set_description(f'Epoch {epoch:02d}')
         t0 = time.time()
+        model.train()
         
         total_loss = 0
+        grads = defaultdict(list)
 
-        for i, (input_nodes, seeds, blocks) in enumerate(train_loader):
+        for input_nodes, seeds, blocks in train_loader:
             blocks = [blk.to(device) for blk in blocks]
             seeds = seeds[category]     # we only predict the nodes with type "category"
             batch_size = seeds.shape[0]
+            #n_inputs = {k: v.shape[0] for k, v in input_nodes.items()}
+            #print(f"Batch size: {batch_size} | Input nodes: {n_inputs}")
 
             emb = extract_embed(node_embed, input_nodes)
             # Get the batch's raw "paper" features
@@ -431,10 +442,21 @@ def train(g, model, node_embed, optimizer, train_loader, split_idx,
             loss.backward()
             optimizer.step()
 
+            for name, p in model.named_parameters():
+                if p.grad is None:
+                    continue
+                grads[name].append(p.grad.data.norm(2).item())
+
+            for name, p in node_embed.named_parameters():
+                if p.grad is None:
+                    continue
+                grads[name].append(p.grad.data.norm(2).item())
+            
             total_loss += loss.item() * batch_size
             pbar.update(batch_size)
         
         pbar.close()
+        grads_list.append(grads)
         t_delta = time.time() - t0
         loss = total_loss / N_train
         
@@ -451,7 +473,7 @@ def train(g, model, node_embed, optimizer, train_loader, split_idx,
     if model_path is not None:
         th.save(model.state_dict(), model_path)
     
-    return logger
+    return logger, grads_list
 
 @th.no_grad()
 def test(g, model, node_embed, y_true, device, split_idx, args):
@@ -516,7 +538,8 @@ def main(args):
     # Static parameters
     hyperparameters = dict(
         num_layers = 2,
-        fanout = [25, 20], #TODO: verify this is in the same layer-order between PyG and DGL
+        #fanout = [25, 20], #TODO: verify this is in the same layer-order between PyG and DGL
+        fanout = [6, 5],
         batch_size=1024,
     )
     hyperparameters.update(vars(args))
@@ -539,10 +562,12 @@ def main(args):
         all_params = itertools.chain(model.parameters(), embed_layer.parameters())
         optimizer = th.optim.Adam(all_params, lr=hyperparameters['lr'])
 
-        logger = train(g, model, embed_layer(), optimizer, train_loader, split_idx,
+        logger, grads_list = train(g, model, embed_layer(), optimizer, train_loader, split_idx,
               labels, logger, 'models/model0.pt', device, run, hyperparameters)
 
         logger.print_statistics(run)
+        with open('grads_list.pkl', 'wb') as f:
+            pickle.dump(grads_list, f)
     
     print("Final performance: ")
     logger.print_statistics()
